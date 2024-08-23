@@ -1,0 +1,154 @@
+import os
+import subprocess
+import uuid
+import logging
+import requests
+import win32file
+
+# Setup logging
+log_directory = os.path.dirname(os.path.abspath(__file__))
+log_file_path = os.path.join(log_directory, 'disk_image_stream.log')
+
+# Ensure log directory exists
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+
+logging.basicConfig(filename=log_file_path, level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+logging.info("Script started.")
+
+def get_mac_address():
+    try:
+        print("Attempting to get MAC address using uuid.getnode()")
+        mac = uuid.getnode()
+        if (mac >> 40) % 2:
+            raise ValueError("MAC address indicates a locally administered and not a universally unique address")
+        
+        mac_address = ':'.join(['{:02x}'.format((mac >> elements) & 0xff) for elements in range(0, 2 * 6, 2)][::-1])
+        mac_address = mac_address.replace(":", "")
+        logging.info("MAC address obtained: {}".format(mac_address))
+        print("MAC address obtained: {}".format(mac_address))
+        return mac_address
+    except Exception as e:
+        logging.error("Error getting MAC address using uuid.getnode(): {}".format(e), exc_info=True)
+        print("Error getting MAC address using uuid.getnode(): {}".format(e))
+        return get_mac_address_alternative()
+
+def get_mac_address_alternative():
+    try:
+        print("Attempting to get MAC address using getmac command")
+        output = subprocess.check_output("getmac", shell=True).decode()
+        mac = [line.split()[0] for line in output.split('\n') if line and '-' in line][0]
+        mac_address = mac.replace('-', '')
+        logging.info("Alternative MAC address obtained: {}".format(mac_address))
+        print("Alternative MAC address obtained: {}".format(mac_address))
+        return mac_address
+    except Exception as e:
+        logging.error("Error getting MAC address using alternative method: {}".format(e), exc_info=True)
+        print("Error getting MAC address using alternative method: {}".format(e))
+        return None
+
+def stream_disk_image(disk_path, server_address, server_port, file_prefix, block_size=4*1024*1024):
+    url = 'http://{}:{}/stream'.format(server_address, server_port)
+    try:
+        dd_path = 'C:\\dd\\dd.exe'  # Ensure this path is correct and dd.exe is located here
+        command = "{} if={} bs={}".format(dd_path, disk_path, block_size)
+        logging.info("Streaming disk image with command: {}".format(command))
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        block_number = 0
+        while True:
+            block = process.stdout.read(block_size)
+            if not block:
+                break
+            block_filename = "{}_block_{:05d}.img".format(file_prefix, block_number)
+            response = requests.post(url, params={'filename': block_filename}, data=block)
+            response.raise_for_status()
+            logging.info("Sent a block of {} bytes for {}".format(len(block), block_filename))
+            block_number += 1
+
+        process.stdout.close()
+        process.wait()
+
+        if process.returncode != 0:
+            error_msg = process.stderr.read().decode()
+            logging.error("Error during streaming disk image: {}".format(error_msg))
+            return False
+
+        logging.info("Finished streaming disk image {} to {}:{}".format(file_prefix, server_address, server_port))
+        return True
+    except subprocess.CalledProcessError as e:
+        logging.error("CalledProcessError: {}".format(e), exc_info=True)
+        return False
+    except requests.exceptions.RequestException as e:
+        logging.error("RequestException: {}".format(e), exc_info=True)
+        return False
+    except Exception as e:
+        logging.error("Unexpected error: {}".format(e), exc_info=True)
+        return False
+
+def get_physical_disks():
+    disks = []
+    try:
+        for i in range(32):
+            path = r'\\.\PhysicalDrive{}'.format(i)
+            try:
+                handle = win32file.CreateFile(
+                    path,
+                    win32file.GENERIC_READ,
+                    win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
+                    None,
+                    win32file.OPEN_EXISTING,
+                    0,
+                    None
+                )
+                handle.Close()
+                disks.append(path)
+            except Exception as e:
+                logging.info("Stopped checking disks at index {}.".format(i))
+                break
+    except Exception as e:
+        logging.error("Error getting physical disks: {}".format(e), exc_info=True)
+        raise
+    return disks
+
+def main():
+    try:
+        server_address = '192.168.171.136'  # Change to your server address
+        server_port = 5000
+        block_size = 4 * 1024 * 1024  # 4MB blocks
+
+        logging.info("Starting disk image stream script.")
+        print("Starting disk image stream script.")
+
+        mac_address = get_mac_address()
+        if mac_address is None:
+            logging.error("Failed to obtain MAC address, terminating script.")
+            print("Failed to obtain MAC address, terminating script.")
+            return
+
+        logging.info("MAC address: {}".format(mac_address))
+        print("MAC address: {}".format(mac_address))
+
+        physical_disks = get_physical_disks()
+        logging.info("Physical disks found: {}".format(physical_disks))
+        print("Physical disks found: {}".format(physical_disks))
+
+        for index, disk in enumerate(physical_disks):
+            file_prefix = "PhysicalDrive{}_{}".format(index, mac_address)
+            logging.info("Starting stream for {}".format(file_prefix))
+            print("Starting stream for {}".format(file_prefix))
+            if not stream_disk_image(disk, server_address, server_port, file_prefix, block_size):
+                logging.error("Failed to stream disk image for {}".format(file_prefix))
+                print("Failed to stream disk image for {}".format(file_prefix))
+
+        logging.info("Finished disk image stream script.")
+        print("Finished disk image stream script.")
+    except Exception as e:
+        logging.error("Unexpected error in main: {}".format(e), exc_info=True)
+        print("Unexpected error in main: {}".format(e))
+
+if __name__ == "__main__":
+    main()
+    print("Log file should be created at:", log_file_path)
