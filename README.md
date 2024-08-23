@@ -1,0 +1,1 @@
+Open the ddstream.py or the xp version, run the flask server on your linux box with the storage path set correctly, set the ip of the Linux box in ddstream.py, run ddstream.py in powershell, if you have putty open running the flask server on the linux machine, then you should see all the blocks of the disk image stream across.
